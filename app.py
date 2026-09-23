@@ -1,17 +1,17 @@
 import os
 from docx import Document
-from docx.enum.section import WD_SECTION
+from docxcompose.composer import Composer
 import streamlit as st
 
-# 替換文字與方框
 
-
+# 替換段落文字
 def replace_text_in_paragraph(paragraph, replacements):
   for key, value in replacements.items():
     if key in paragraph.text:
       paragraph.text = paragraph.text.replace(key, value)
 
 
+# 替換全文與表格內容
 def process_document_replacements(doc, replacements):
   for p in doc.paragraphs:
     replace_text_in_paragraph(p, replacements)
@@ -20,14 +20,6 @@ def process_document_replacements(doc, replacements):
       for cell in row.cells:
         for p in cell.paragraphs:
           replace_text_in_paragraph(p, replacements)
-
-
-def append_document(master_doc, append_doc):
-  new_section = master_doc.add_section(WD_SECTION.NEW_PAGE)
-  new_section.header.is_linked_to_previous = False
-  new_section.footer.is_linked_to_previous = False
-  for element in append_doc.element.body:
-    master_doc.element.body.append(element)
 
 
 st.set_page_config(
@@ -91,7 +83,10 @@ if submitted:
     master_files = [
         f
         for f in os.listdir(".")
-        if f.endswith(".docx") and "H2U全方位" in f and not f.startswith("~$")
+        if f.endswith(".docx")
+        and "H2U全方位" in f
+        and not f.startswith("~$")
+        and not f.startswith("output_")
     ]
     if not master_files:
       st.error("找不到主約 Word 檔案！")
@@ -99,7 +94,7 @@ if submitted:
 
     doc_master = Document(master_files[0])
 
-    # 全頁跨頁變數替換字典
+    # 跨頁變數替換
     replacements = {
         "請填入公司全名": client_name,
         "請填入甲方全名": client_name,
@@ -113,7 +108,7 @@ if submitted:
         "9,999,999": credit_limit,
     }
 
-    # 方框☐ 替換為 ■
+    # 方框替換
     if opt_sys:
       replacements[
           "☐\tH2U客戶健康管理系統使用授權"
@@ -137,7 +132,10 @@ if submitted:
 
     process_document_replacements(doc_master, replacements)
 
-    # 動態拼接附約並填寫附約頁面欄位
+    # 初始化專業文件合併器
+    composer = Composer(doc_master)
+
+    # 依選取項目安全拼接附約
     attachment_map = {
         opt_sys: [
             f
@@ -173,9 +171,9 @@ if submitted:
       if is_selected and matched_files:
         att_doc = Document(matched_files[0])
         process_document_replacements(att_doc, replacements)
-        append_document(doc_master, att_doc)
+        composer.append(att_doc)
 
-    # 若有非標需求，自動拼接《合約增補協議書》
+    # 若有非標需求，拼接增補協議
     if amendment_text.strip():
       amend_files = [
           f
@@ -193,10 +191,10 @@ if submitted:
             "     ": client_name,
         }
         process_document_replacements(amend_doc, amend_replacements)
-        append_document(doc_master, amend_doc)
+        composer.append(amend_doc)
 
     output_filename = f"{client_name}_完整合約包.docx"
-    doc_master.save(output_filename)
+    composer.save(output_filename)
 
     st.success("🎉 全頁欄位已成功帶入並生成完整合約包！")
     with open(output_filename, "rb") as file:
