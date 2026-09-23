@@ -1,29 +1,58 @@
 import os
 import streamlit as st
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docxcompose.composer import Composer
 
-# 精準替換段落文字，不破壞空白排版
-def replace_text_in_paragraph(paragraph, replacements):
-    for key, value in replacements.items():
-        if key in paragraph.text:
-            # 針對 run 替換以盡可能保留原始字型格式
-            for run in paragraph.runs:
-                if key in run.text:
-                    run.text = run.text.replace(key, value)
-            # 若 run 被切斷則進行段落層級替換
-            if key in paragraph.text:
-                paragraph.text = paragraph.text.replace(key, value)
+# 重新設定節區的頁碼從 1 開始獨立計算
+def reset_section_page_numbering(doc):
+    for section in doc.sections:
+        section.header.is_linked_to_previous = False
+        section.footer.is_linked_to_previous = False
+        sectPr = section._sectPr
+        pgNumType = sectPr.find(qn('w:pgNumType'))
+        if pgNumType is None:
+            pgNumType = OxmlElement('w:pgNumType')
+            sectPr.append(pgNumType)
+        pgNumType.set(qn('w:start'), '1')
 
-# 替換全文與表格內容
+# 替換文字並保留原始段落字型與大小
+def replace_text_preserve_format(paragraph, old_text, new_text):
+    if old_text not in paragraph.text:
+        return
+    for run in paragraph.runs:
+        if old_text in run.text:
+            run.text = run.text.replace(old_text, new_text)
+            return
+    # 若被 Word 拆成多個 run，退回整段替換但保留第一個 run 的字型樣式
+    runs = paragraph.runs
+    if runs:
+        font_name = runs[0].font.name
+        font_size = runs[0].font.size
+        bold = runs[0].bold
+        color = runs[0].font.color.rgb if runs[0].font.color else None
+        
+        full_text = paragraph.text.replace(old_text, new_text)
+        paragraph.text = ""
+        new_run = paragraph.add_run(full_text)
+        new_run.font.name = font_name
+        new_run.font.size = font_size
+        new_run.bold = bold
+        if color:
+            new_run.font.color.rgb = color
+
+# 遞迴遍歷全文與表格執行精準替換
 def process_document_replacements(doc, replacements):
     for p in doc.paragraphs:
-        replace_text_in_paragraph(p, replacements)
+        for old_txt, new_txt in replacements.items():
+            replace_text_preserve_format(p, old_txt, new_txt)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
-                    replace_text_in_paragraph(p, replacements)
+                    for old_txt, new_txt in replacements.items():
+                        replace_text_preserve_format(p, old_txt, new_txt)
 
 st.set_page_config(page_title="H2U 永悅健康 - 全功能合約自動生成系統", layout="wide")
 st.title("📄 H2U 全方位職場健康管理 - 全功能合約生成系統")
@@ -84,37 +113,47 @@ if submitted:
 
         doc_master = Document(master_files[0])
 
-        # 精準替換字典：嚴格禁止以通用空格（如 "     "）作爲取代條件
-        replacements = {
-            "請填入公司全名": client_name,
-            "請填入甲方全名": client_name,
+        # 主約專用替換字典
+        master_replacements = {
             "2025年9月1日": sign_date,
             "2026年8月31日": end_date_str,
             "00 個月": f"{duration_months} 個月",
             "OO廠": factory_name,
+            "新竹一廠": factory_name,
             "此後第幾類什麼型請自己填": industry_type,
             "月結【30】日內": f"月結【{payment_days}】日內",
-            "9,999,999": credit_limit,
+            "甲    方：     ": f"甲    方：{client_name}",
+            "代 表 人：     ": f"代 表 人：{client_rep}",
+            "統一編號：     ": f"統一編號：{client_tax_id}",
+            "地    址：     ": f"地    址：{client_address}",
+            "本契約總價為新臺幣 (下同)      元整": f"本契約總價為新臺幣 (下同) {total_amount}元整",
+            "時數乘以      元(含稅)": f"時數乘以 {doctor_rate} 元(含稅)",
+            "時數乘以    元(含稅)": f"時數乘以 {nurse_rate} 元(含稅)",
+            "立契約書人\n": f"立契約書人\n{client_name}\n(以下簡稱「甲方」)\n",
         }
 
         # 方框狀態替換
         if opt_sys:
-            replacements["☐\tH2U客戶健康管理系統使用授權"] = "■\tH2U客戶健康管理系統使用授權"
-            replacements["☐  H2U客戶健康管理系統使用授權條款"] = "■  H2U客戶健康管理系統使用授權條款"
+            master_replacements["☐ H2U客戶健康管理系統使用授權"] = "■ H2U客戶健康管理系統使用授權"
+            master_replacements["☐  H2U客戶健康管理系統使用授權條款"] = "■  H2U客戶健康管理系統使用授權條款"
         if opt_health:
-            replacements["☐\t職場健康規劃服務"] = "■\t職場健康規劃服務"
-            replacements["☐  職場健康規劃服務條款"] = "■  職場健康規劃服務條款"
+            master_replacements["☐ 職場健康規劃服務"] = "■ 職場健康規劃服務"
+            master_replacements["☐  職場健康規劃服務條款"] = "■  職場健康規劃服務條款"
         if opt_exam:
-            replacements["☐\t健檢顧問服務"] = "■\t健檢顧問服務"
-            replacements["☐  健檢顧問服務條款"] = "■  健檢顧問服務條款"
+            master_replacements["☐ 健檢顧問服務"] = "■ 健檢顧問服務"
+            master_replacements["☐  健檢顧問服務條款"] = "■  健檢顧問服務條款"
         if opt_pano:
-            replacements["☐\tH2U數位健康全景平台之使用授權"] = "■\tH2U數位健康全景平台之使用授權"
-            replacements["☐  H2U數位健康全景平台之使用授權條款"] = "■  H2U數位健康全景平台之使用授權條款"
+            master_replacements["☐ H2U數位健康全景平台之使用授權"] = "■ H2U數位健康全景平台之使用授權"
+            master_replacements["☐  H2U數位健康全景平台之使用授權條款"] = "■  H2U數位健康全景平台之使用授權條款"
 
-        process_document_replacements(doc_master, replacements)
+        process_document_replacements(doc_master, master_replacements)
+
+        # 確保主約頁碼由 1 開始
+        reset_section_page_numbering(doc_master)
 
         composer = Composer(doc_master)
 
+        # 各附約檔案對照
         attachment_map = {
             opt_sys: [f for f in os.listdir(".") if "健康管理系統" in f and f.endswith(".docx") and not f.startswith("~$")],
             opt_health: [f for f in os.listdir(".") if "職場健康規劃" in f and f.endswith(".docx") and not f.startswith("~$")],
@@ -122,30 +161,41 @@ if submitted:
             opt_pano: [f for f in os.listdir(".") if "全景平台" in f and f.endswith(".docx") and not f.startswith("~$")],
         }
 
+        # 附約替換字典
+        att_replacements = {
+            "     ": client_name,
+            "9,999,999": credit_limit,
+            "1,000,000": credit_limit,
+            "甲    方：     ": f"甲    方：{client_name}",
+            "代 表 人：     ": f"代 表 人：{client_rep}",
+            "統一編號：     ": f"統一編號：{client_tax_id}",
+            "地    址：     ": f"地    址：{client_address}",
+        }
+
         for is_selected, matched_files in attachment_map.items():
             if is_selected and matched_files:
                 att_doc = Document(matched_files[0])
-                process_document_replacements(att_doc, replacements)
-                # 附約獨立分節，斷開與前一節頁首頁尾關聯，保護主約頁碼
-                for sec in att_doc.sections:
-                    sec.header.is_linked_to_previous = False
-                    sec.footer.is_linked_to_previous = False
+                process_document_replacements(att_doc, att_replacements)
+                reset_section_page_numbering(att_doc)
                 composer.append(att_doc)
 
+        # 增補協議處理
         if amendment_text.strip():
             amend_files = [f for f in os.listdir(".") if "增補協議" in f and f.endswith(".docx") and not f.startswith("~$")]
             if amend_files:
                 amend_doc = Document(amend_files[0])
                 amend_replacements = {
-                    "請填入原合約完整文件名稱": "H2U全方位職場健康管理服務契約",
-                    "例如原合約第O條第X項第Y款改為：": f"原合約條款修訂如下：{amendment_text}",
+                    "原合約條款修訂如下：測是測試測試(如欲新增下一條請直接enter如擬於同條新增新項或換行請shift+enter)": f"原合約條款修訂如下：{amendment_text}",
                     "2025年7月10日": sign_date,
-                    "請填入甲方全名": client_name,
+                    "2025年3月1日": sign_date,
+                    "     ": client_name,
+                    "甲        方：     ": f"甲        方：{client_name}",
+                    "代  表  人：     ": f"代  表  人：{client_rep}",
+                    "統一編號：     ": f"統一編號：{client_tax_id}",
+                    "地        址：     ": f"地        址：{client_address}",
                 }
                 process_document_replacements(amend_doc, amend_replacements)
-                for sec in amend_doc.sections:
-                    sec.header.is_linked_to_previous = False
-                    sec.footer.is_linked_to_previous = False
+                reset_section_page_numbering(amend_doc)
                 composer.append(amend_doc)
 
         output_filename = f"{client_name}_完整合約包.docx"
